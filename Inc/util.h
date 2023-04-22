@@ -127,5 +127,10 @@ typedef struct {
 } MultipleTap;
 void multipleTapDet(int16_t u, uint32_t timeNow, MultipleTap *x);
 
+// Aditionl functions 
+void getNunchuckBtnPressState(uint8_t *pbtnZ, uint8_t *pbtnC);
+uint8_t isNunchuckConnectd(void);
+uint16_t getAbsSpeed();
+int16_t  getSpeed();
 #endif
 
