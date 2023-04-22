@@ -418,7 +418,7 @@ void UART_DisableRxErrors(UART_HandleTypeDef *huart)
 
 void poweronMelody(void) {
     buzzerCount = 0;  // prevent interraction with beep counter
-    for (int i = 8; i >= 0; i--) {
+    for (int i = 58; i >= 50; i--) {
       buzzerFreq = (uint8_t)i;
       HAL_Delay(100);
     }
@@ -1545,7 +1545,7 @@ void poweroff(void) {
   #endif
   buzzerCount = 0;  // prevent interraction with beep counter
   buzzerPattern = 0;
-  for (int i = 0; i < 8; i++) {
+  for (int i = 50; i < 58; i++) {
     buzzerFreq = (uint8_t)i;
     HAL_Delay(100);
   }
@@ -1570,14 +1570,14 @@ void poweroffPressCheck(void) {
         HAL_Delay(1000);
         if (HAL_GPIO_ReadPin(BUTTON_PORT, BUTTON_PIN)) {  // Double press: Adjust Max Current, Max Speed
           while(HAL_GPIO_ReadPin(BUTTON_PORT, BUTTON_PIN)) { HAL_Delay(10); }
-          beepLong(8);
+          beepLong(58);
           updateCurSpdLim();
-          beepShort(5);
+          beepShort(50);
         } else {                                          // Long press: Calibrate ADC Limits
           #ifdef AUTO_CALIBRATION_ENA
-          beepLong(16); 
+          beepLong(66); 
           adcCalibLim();
-          beepShort(5);
+          beepShort(50);
           #endif
         }
       } else if (cnt_press > 8) {                         // Short press: power off (80 ms debounce)
@@ -1765,4 +1765,22 @@ void multipleTapDet(int16_t u, uint32_t timeNow, MultipleTap *x) {
   x->t_timePrev 	  = t_time;
 }
 
+void getNunchuckBtnPressState(uint8_t *pbtnZ, uint8_t *pbtnC)
+{
+  /* Press is 0, not pressed is 1 for the nunchuk */
+  if(pbtnZ) *pbtnZ = !button1;
+  if(pbtnC) *pbtnC =  !button2;
+}
 
+extern nunchuk_state nunchukState;
+uint8_t isNunchuckConnectd()
+{
+  return nunchukState == NUNCHUK_CONNECTED;
+}
+uint16_t getAbsSpeed(void)
+{
+  return speedAvgAbs;
+}
+int16_t  getSpeed(void){
+  return speedAvg;
+}
