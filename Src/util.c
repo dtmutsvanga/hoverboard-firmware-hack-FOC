@@ -187,7 +187,7 @@ static uint32_t commandR_len = sizeof(commandR);
 #endif
 
 #if defined(SUPPORT_BUTTONS) || defined(SUPPORT_BUTTONS_LEFT) || defined(SUPPORT_BUTTONS_RIGHT)
-static uint8_t button1;                 // Blue
+static uint8_t button1 = 1, prevButton1 = 1;                 // Blue
 static uint8_t button2;                 // Green
 #endif
 
@@ -456,35 +456,32 @@ void beepShortMany(uint8_t cnt, int8_t dir) {
       }
     }
 }
-
+/**
+ * Calculates the average speed based on the measurements from the left and right motors.
+ * The average speed is calculated by subtracting the speed of the right motor from the speed of the left motor,
+ * and then dividing the result by 2. The minus sign is applied because the motors spin in opposite directions.
+ * 
+ * @param None
+ * @return None
+ */
 void calcAvgSpeed(void) {
-    // Calculate measured average speed. The minus sign (-) is because motors spin in opposite directions
+    // Calculate measured average speed. The minus sign (-) is because motors spin in opposite
+    // directions
     speedAvg = 0;
-    #if defined(MOTOR_LEFT_ENA)
-      #if defined(INVERT_L_DIRECTION)
-        speedAvg -= rtY_Left.n_mot;
-      #else
-        speedAvg += rtY_Left.n_mot;
-      #endif
-    #endif
-    #if defined(MOTOR_RIGHT_ENA)
-      #if defined(INVERT_R_DIRECTION)
-        speedAvg += rtY_Right.n_mot;
-      #else
-        speedAvg -= rtY_Right.n_mot;
-      #endif
 
-      // Average only if both motors are enabled
-      #if defined(MOTOR_LEFT_ENA)
-        speedAvg /= 2;
-      #endif  
-    #endif
+    // IF one motor is moving in the +ve direction, the second is moving in the other direction, hence 
+    // one motor is negative and the other is positive
+    speedAvg += rtY_Left.n_mot;
+    speedAvg -= rtY_Right.n_mot;
+    speedAvg /= 2;
 
-    // Handle the case when SPEED_COEFFICIENT sign is negative (which is when most significant bit is 1)
+    // Handle the case when SPEED_COEFFICIENT sign is negative (which is when most significant bit
+    // is 1)
     if (SPEED_COEFFICIENT & (1 << 16)) {
-      speedAvg    = -speedAvg;
-    } 
-    speedAvgAbs   = abs(speedAvg);
+        speedAvg = -speedAvg;
+    }
+
+    speedAvgAbs = abs(speedAvg);
 }
 
  /*
@@ -752,11 +749,32 @@ void cruiseControl(uint8_t button) {
   #endif
 }
 
+void cruiseControlSpd(uint8_t button, int16_T spdRt, int16_T spdLft)
+{
+#ifdef CRUISE_CONTROL_SUPPORT
+    if (button && !rtP_Left.b_cruiseCtrlEna) { // Cruise control activated
+        rtP_Left.n_cruiseMotTgt = spdLft;
+        rtP_Right.n_cruiseMotTgt = spdRt;
+        rtP_Left.b_cruiseCtrlEna = 1;
+        rtP_Right.b_cruiseCtrlEna = 1;
+        cruiseCtrlAcv = 1;
+        beepShortMany(2, 1); // 200 ms beep delay. Acts as a debounce also.
+    } else if (button && rtP_Left.b_cruiseCtrlEna && !standstillAcv) { // Cruise control deactivated
+                                                                       // if no Standstill Hold is
+                                                                       // active
+        rtP_Left.b_cruiseCtrlEna = 0;
+        rtP_Right.b_cruiseCtrlEna = 0;
+        cruiseCtrlAcv = 0;
+        beepShortMany(2, -1);
+    }
+#endif /* CRUISE_CONTROL_SUPPORT */
+}
+
  /*
  * Check Input Type
  * This function identifies the input type: 0: Disabled, 1: Normal Pot, 2: Middle Resting Pot
  */
-int checkInputType(int16_t min, int16_t mid, int16_t max){
+int checkInputType(int16_t min, int16_t mid, int16_t max) {
 
   int type = 0;  
   #ifdef CONTROL_ADC
@@ -1049,6 +1067,7 @@ void handleTimeout(void) {
  * Function to calculate the command to the motors. This function also manages:
  * - timeout detection
  * - MIN/MAX limitations and deadband
+ * - button1 is used for cruise control
  */
 void readCommand(void) {
     readInputRaw();
@@ -1079,7 +1098,11 @@ void readCommand(void) {
     #endif
 
     #if defined(CRUISE_CONTROL_SUPPORT) && (defined(SUPPORT_BUTTONS) || defined(SUPPORT_BUTTONS_LEFT) || defined(SUPPORT_BUTTONS_RIGHT))
-        cruiseControl(button1);                                           // Cruise control activation/deactivation
+        //if((button1 ^ prevButton1))
+        //{
+        //  cruiseControl(button1 ^ prevButton1);                                           // Cruise control activation/deactivation
+        //}
+        //prevButton1 = button1;
     #endif
 }
 

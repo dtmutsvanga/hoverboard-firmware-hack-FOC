@@ -130,7 +130,9 @@ void multipleTapDet(int16_t u, uint32_t timeNow, MultipleTap *x);
 // Aditionl functions 
 void getNunchuckBtnPressState(uint8_t *pbtnZ, uint8_t *pbtnC);
 uint8_t isNunchuckConnectd(void);
-uint16_t getAbsSpeed();
-int16_t  getSpeed();
+uint16_t getAbsSpeed(void);
+int16_t  getSpeed(void);
+void cruiseControl(uint8_t button);
+void cruiseControlSpd(uint8_t button, int16_t spdRt, int16_t spdLgt);
 #endif
 
