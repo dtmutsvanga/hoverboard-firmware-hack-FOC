@@ -156,7 +156,7 @@
 // This is enough to assist but weak enough to easily stop by hand
 #define I_MOT_MAX       5                    // [A] Maximum single motor current limit (was 15A, reduced for stroller)
 #define I_DC_MAX        7                    // [A] Maximum stage2 DC Link current limit (I_MOT_MAX + 2A)
-#define N_MOT_MAX       120                  // [rpm] Maximum motor speed limit (was 500, reduced for walking pace)
+#define N_MOT_MAX       500                  // [rpm] Maximum motor speed limit (was 500, reduced for walking pace)
 
 // Field Weakening / Phase Advance
 #define FIELD_WEAK_ENA  0               // [-] Field Weakening / Phase Advance enable flag: 0 = Disabled (default), 1 = Enabled
