@@ -152,9 +152,11 @@
 #define DIAG_ENA        1               // [-] Motor Diagnostics enable flag: 0 = Disabled, 1 = Enabled (default)
 
 // Limitation settings 
-#define I_MOT_MAX       15 //15              // [A] Maximum single motor current limit
-#define I_DC_MAX        17 //17              // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
-#define N_MOT_MAX       500                  // [rpm] Maximum motor speed limit
+// For 25kg stroller on 8" wheels: 3-4A gives ~1-2 Nm torque per motor
+// This is enough to assist but weak enough to easily stop by hand
+#define I_MOT_MAX       2                    // [A] Maximum single motor current limit (was 15A, reduced for stroller)
+#define I_DC_MAX        3                    // [A] Maximum stage2 DC Link current limit (I_MOT_MAX + 2A)
+#define N_MOT_MAX       200                  // [rpm] Maximum motor speed limit (was 500, reduced for walking pace)
 
 // Field Weakening / Phase Advance
 #define FIELD_WEAK_ENA  0               // [-] Field Weakening / Phase Advance enable flag: 0 = Disabled (default), 1 = Enabled

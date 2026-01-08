@@ -204,7 +204,7 @@ static uint8_t pcc_needs_reset = 0;
 // In TRQ_MODE, PWM controls motor current (torque) directly, range -1000 to +1000
 // We apply a CONSTANT assist torque in the direction of wheel movement
 // This doesn't care about exact speed - just adds gentle push in direction of travel
-#define PCC_ASSIST_TORQUE_BASE      80      // Base assist (out of 1000), ~8% - gentle push
+#define PCC_ASSIST_TORQUE_BASE      (80 * 4)      // Base assist (out of 1000), ~8% - gentle push
 #define PCC_ASSIST_TORQUE_ACCEL     150     // Assist when accelerating - stronger pull
 #define PCC_ASSIST_TORQUE_MAX       200     // Maximum assist torque (safety limit)
 
