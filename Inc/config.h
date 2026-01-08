@@ -154,8 +154,8 @@
 // Limitation settings 
 // For 25kg stroller on 8" wheels: 3-4A gives ~1-2 Nm torque per motor
 // This is enough to assist but weak enough to easily stop by hand
-#define I_MOT_MAX       2                    // [A] Maximum single motor current limit (was 15A, reduced for stroller)
-#define I_DC_MAX        3                    // [A] Maximum stage2 DC Link current limit (I_MOT_MAX + 2A)
+#define I_MOT_MAX       4                    // [A] Maximum single motor current limit (was 15A, reduced for stroller)
+#define I_DC_MAX        6                    // [A] Maximum stage2 DC Link current limit (I_MOT_MAX + 2A)
 #define N_MOT_MAX       200                  // [rpm] Maximum motor speed limit (was 500, reduced for walking pace)
 
 // Field Weakening / Phase Advance

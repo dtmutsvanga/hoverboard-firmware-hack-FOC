@@ -225,10 +225,12 @@ typedef struct {
     int16_t     targetR;            // Current target speed for right motor
     int16_t     lastSpeedL;         // Previous loop's speed (for accel detection)
     int16_t     lastSpeedR;         // Previous loop's speed (for accel detection)
+    int8_t      assistDirL;         // Locked assist direction: +1=forward, -1=backward, 0=none
+    int8_t      assistDirR;         // Locked assist direction: +1=forward, -1=backward, 0=none
     uint8_t     initialized;        // Init flag
 } PCC_Context_t;
 
-static PCC_Context_t pcc = {PCC_STATE_IDLE, 0, 0, 0, 0, 0, 0, 0};
+static PCC_Context_t pcc = {PCC_STATE_IDLE, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 #ifdef MULTI_MODE_DRIVE
 static uint8_t drive_mode;
@@ -731,6 +733,8 @@ static void PCC_EnterState(PCC_State_t newState)
             rtP_Right.n_cruiseMotTgt = 0;
             pwml = pwmr = 0;
             pcc.targetL = pcc.targetR = 0;
+            pcc.assistDirL = 0;  // Clear locked direction
+            pcc.assistDirR = 0;
             cruiseCtrlAcv = 0;
             // CRITICAL: Use OPEN_MODE to allow freewheeling
             ctrlModReq = OPEN_MODE;
@@ -779,6 +783,8 @@ static void PCC_Init(void)
     pcc.targetR = 0;
     pcc.lastSpeedL = 0;
     pcc.lastSpeedR = 0;
+    pcc.assistDirL = 0;  // No locked direction
+    pcc.assistDirR = 0;
     pcc.initialized = 1;
     
     enable = 0;
@@ -873,6 +879,24 @@ static void handleStatePushCruiseControl(void)
             enable = 1;
             
             {
+                // DIRECTION LOCKING: Lock direction on first entry, prevent reversal on stop
+                // This fixes the bug where stopping the wheel causes it to reverse
+                if (pcc.assistDirL == 0) {
+                    // First time in TRACKING - lock direction based on current speed
+                    if (actualL > PCC_DISENGAGE_SPEED_RPM) {
+                        pcc.assistDirL = 1;   // Lock to forward
+                    } else if (actualL < -PCC_DISENGAGE_SPEED_RPM) {
+                        pcc.assistDirL = -1;  // Lock to backward
+                    }
+                }
+                if (pcc.assistDirR == 0) {
+                    if (actualR > PCC_DISENGAGE_SPEED_RPM) {
+                        pcc.assistDirR = 1;
+                    } else if (actualR < -PCC_DISENGAGE_SPEED_RPM) {
+                        pcc.assistDirR = -1;
+                    }
+                }
+                
                 // Choose assist level based on acceleration
                 int16_t assistTorque = isAccelerating ? PCC_ASSIST_TORQUE_ACCEL : PCC_ASSIST_TORQUE_BASE;
                 
@@ -891,21 +915,21 @@ static void handleStatePushCruiseControl(void)
                     assistTorque = PCC_ASSIST_TORQUE_MAX;
                 }
                 
-                // Apply torque in DIRECTION of wheel movement
-                // Left motor: positive speed → positive torque
-                if (actualL > PCC_DISENGAGE_SPEED_RPM) {
-                    pwml = assistTorque;       // Assist forward
-                } else if (actualL < -PCC_DISENGAGE_SPEED_RPM) {
-                    pwml = -assistTorque;      // Assist backward
+                // Apply torque using LOCKED direction (not instantaneous speed)
+                // This prevents direction reversal when user stops the wheel
+                // Left motor
+                if (pcc.assistDirL > 0 && actualL > 0) {
+                    pwml = assistTorque;       // Assist forward (locked forward, still moving forward)
+                } else if (pcc.assistDirL < 0 && actualL < 0) {
+                    pwml = -assistTorque;      // Assist backward (locked backward, still moving backward)
                 } else {
-                    pwml = 0;                  // Too slow - no assist
+                    pwml = 0;                  // Speed crossed zero or direction mismatch - stop assist
                 }
                 
-                // Right motor: note reversed polarity in speed reading
-                // actualR is already corrected, but PWM needs negation
-                if (actualR > PCC_DISENGAGE_SPEED_RPM) {
+                // Right motor (PWM needs negation due to wiring)
+                if (pcc.assistDirR > 0 && actualR > 0) {
                     pwmr = -assistTorque;      // Assist forward (negated for right motor)
-                } else if (actualR < -PCC_DISENGAGE_SPEED_RPM) {
+                } else if (pcc.assistDirR < 0 && actualR < 0) {
                     pwmr = assistTorque;       // Assist backward (negated for right motor)
                 } else {
                     pwmr = 0;
@@ -957,18 +981,20 @@ static void handleStatePushCruiseControl(void)
                     assistTorque = (assistTorque * margin) / 30;
                 }
                 
-                // Apply torque in direction of movement
-                if (actualL > PCC_DISENGAGE_SPEED_RPM) {
+                // Apply torque using LOCKED direction (same as TRACKING)
+                // Left motor
+                if (pcc.assistDirL > 0 && actualL > 0) {
                     pwml = assistTorque;
-                } else if (actualL < -PCC_DISENGAGE_SPEED_RPM) {
+                } else if (pcc.assistDirL < 0 && actualL < 0) {
                     pwml = -assistTorque;
                 } else {
-                    pwml = 0;
+                    pwml = 0;  // Speed crossed zero - stop assist
                 }
                 
-                if (actualR > PCC_DISENGAGE_SPEED_RPM) {
+                // Right motor (PWM needs negation)
+                if (pcc.assistDirR > 0 && actualR > 0) {
                     pwmr = -assistTorque;
-                } else if (actualR < -PCC_DISENGAGE_SPEED_RPM) {
+                } else if (pcc.assistDirR < 0 && actualR < 0) {
                     pwmr = assistTorque;
                 } else {
                     pwmr = 0;
@@ -1012,18 +1038,20 @@ static void handleStatePushCruiseControl(void)
                 
                 if (remainingTorque < 0) remainingTorque = 0;
                 
-                // Apply remaining torque in direction of movement
-                if (actualL > PCC_DISENGAGE_SPEED_RPM) {
+                // Apply remaining torque using LOCKED direction
+                // Left motor
+                if (pcc.assistDirL > 0 && actualL > 0) {
                     pwml = remainingTorque;
-                } else if (actualL < -PCC_DISENGAGE_SPEED_RPM) {
+                } else if (pcc.assistDirL < 0 && actualL < 0) {
                     pwml = -remainingTorque;
                 } else {
                     pwml = 0;
                 }
                 
-                if (actualR > PCC_DISENGAGE_SPEED_RPM) {
+                // Right motor (PWM needs negation)
+                if (pcc.assistDirR > 0 && actualR > 0) {
                     pwmr = -remainingTorque;
-                } else if (actualR < -PCC_DISENGAGE_SPEED_RPM) {
+                } else if (pcc.assistDirR < 0 && actualR < 0) {
                     pwmr = remainingTorque;
                 } else {
                     pwmr = 0;
