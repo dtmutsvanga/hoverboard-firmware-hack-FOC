@@ -85,6 +85,8 @@ extern volatile int pwml; // global variable for pwm left. -1000 to 1000
 extern volatile int pwmr; // global variable for pwm right. -1000 to 1000
 
 extern uint8_t enable; // global variable for motor enable
+extern uint8_t cruiseCtrlAcv; // cruise control active flag (defined in util.c)
+extern uint8_t ctrlModReq; // control mode request (defined in util.c) - 0:OPEN, 1:VLT, 2:SPD, 3:TRQ
 
 extern int16_t batVoltage; // global variable for battery voltage
 
@@ -172,6 +174,61 @@ static uint16_t rate = RATE; // Adjustable rate to support multiple drive modes 
 
 // Static variable to track PCC (Push Cruise Control) state reset - needs to be reset when entering State 0
 static uint8_t pcc_needs_reset = 0;
+
+/*******************************************************************************
+ * PUSH CRUISE CONTROL (PCC) - Full Implementation
+ * E-Bike Style Assistive Speed Control
+ * 
+ * Concept: User pushes the device to initiate movement. System detects the
+ * wheel speed, measures it over a sampling window, then engages motor assist
+ * to maintain that speed, reducing user effort.
+ ******************************************************************************/
+
+/* PCC Configuration Parameters - Tuned for 25kg stroller
+ * 
+ * TORQUE-BASED ASSIST APPROACH (TRQ_MODE):
+ * - Motor applies constant assist TORQUE in direction of wheel movement
+ * - Doesn't care about exact speed - just adds gentle push
+ * - Never fights user: torque is always in direction of travel
+ * - No back-EMF issues: torque mode bypasses voltage control
+ */
+#define PCC_ENGAGE_SPEED_RPM        5      // Speed to START assist
+#define PCC_DISENGAGE_SPEED_RPM     2       // Speed to STOP assist (hysteresis)
+#define PCC_MAX_SPEED_RPM           150     // Maximum allowed assist speed
+#define PCC_HOLD_TIME_MS            10000    // Max coast time after user releases
+#define PCC_RAMP_RATE_RPM_PER_SEC   200     // How fast motor ramps (RPM per second)
+#define PCC_COOLDOWN_MS             500     // Minimum time in IDLE before re-engaging
+#define PCC_ACCEL_THRESHOLD         3       // RPM/loop to detect acceleration (lowered)
+
+// Torque-Based Assist Parameters (TRQ_MODE)
+// In TRQ_MODE, PWM controls motor current (torque) directly, range -1000 to +1000
+// We apply a CONSTANT assist torque in the direction of wheel movement
+// This doesn't care about exact speed - just adds gentle push in direction of travel
+#define PCC_ASSIST_TORQUE_BASE      80      // Base assist (out of 1000), ~8% - gentle push
+#define PCC_ASSIST_TORQUE_ACCEL     150     // Assist when accelerating - stronger pull
+#define PCC_ASSIST_TORQUE_MAX       200     // Maximum assist torque (safety limit)
+
+/* PCC State definitions */
+typedef enum {
+    PCC_STATE_IDLE,         // Waiting for push, motors disabled
+    PCC_STATE_TRACKING,     // Motor tracking user's push speed (assist mode)
+    PCC_STATE_COASTING,     // User released, maintaining last speed briefly
+    PCC_STATE_RAMP_DOWN     // Gracefully disengaging
+} PCC_State_t;
+
+/* PCC Internal context structure */
+typedef struct {
+    PCC_State_t state;
+    uint32_t    stateEntryTime;     // HAL_GetTick() when state was entered
+    uint32_t    idleEntryTime;      // When we entered IDLE (for cooldown)
+    int16_t     targetL;            // Current target speed for left motor
+    int16_t     targetR;            // Current target speed for right motor
+    int16_t     lastSpeedL;         // Previous loop's speed (for accel detection)
+    int16_t     lastSpeedR;         // Previous loop's speed (for accel detection)
+    uint8_t     initialized;        // Init flag
+} PCC_Context_t;
+
+static PCC_Context_t pcc = {PCC_STATE_IDLE, 0, 0, 0, 0, 0, 0, 0};
 
 #ifdef MULTI_MODE_DRIVE
 static uint8_t drive_mode;
@@ -637,83 +694,353 @@ static void handleStateBabyRocker(int *pstate, uint8_t *pabortrock)
     }
 }
 
-static void handleStatePushCruiseControl()
+/*******************************************************************************
+ * PCC Helper Functions
+ ******************************************************************************/
+
+/* Clamp a value between min and max */
+static int16_t PCC_Clamp(int16_t value, int16_t minVal, int16_t maxVal)
 {
-    static int cc_state = 0;
-    static uint32_t start_time_tick = 0;
-    static int32_t avgL = 0, avgR = 0;   // FIX PCC-2: Changed to int32_t for signed motor speeds
-    static uint32_t avgCtr = 0;
-    static uint8_t first_run = 1;        // FIX PCC-1: Track first run for proper initialization
+    if (value < minVal) return minVal;
+    if (value > maxVal) return maxVal;
+    return value;
+}
 
-    // Check if we need to reset state (when entering State 0 from another state)
-    if (pcc_needs_reset) {
-        cc_state = 0;
-        start_time_tick = time_tick;
-        avgL = 0;
-        avgR = 0;
-        avgCtr = 0;
-        first_run = 0;  // Already initialized now
+/* Ramp a value toward target with maximum step size */
+static int16_t PCC_RampToward(int16_t current, int16_t target, int16_t maxStep)
+{
+    int16_t diff = target - current;
+    if (diff > maxStep) return current + maxStep;
+    if (diff < -maxStep) return current - maxStep;
+    return target;
+}
+
+/* Enter a new PCC state */
+static void PCC_EnterState(PCC_State_t newState)
+{
+    uint32_t now = HAL_GetTick();
+    
+    switch (newState) {
+        case PCC_STATE_IDLE:
+            pcc.idleEntryTime = now;
+            // Disable motors and allow freewheeling
+            enable = 0;
+            rtP_Left.b_cruiseCtrlEna = 0;
+            rtP_Right.b_cruiseCtrlEna = 0;
+            rtP_Left.n_cruiseMotTgt = 0;
+            rtP_Right.n_cruiseMotTgt = 0;
+            pwml = pwmr = 0;
+            pcc.targetL = pcc.targetR = 0;
+            cruiseCtrlAcv = 0;
+            // CRITICAL: Use OPEN_MODE to allow freewheeling
+            ctrlModReq = OPEN_MODE;
+            // Only beep if transitioning from active state
+            if (pcc.state != PCC_STATE_IDLE) {
+                beepShort(30);
+            }
+            break;
+            
+        case PCC_STATE_TRACKING:
+            // TRQ_MODE: PWM controls torque directly - perfect for push assist
+            // PWM will be set in the main loop based on direction of movement
+            ctrlModReq = TRQ_MODE;
+            rtP_Left.b_cruiseCtrlEna = 0;
+            rtP_Right.b_cruiseCtrlEna = 0;
+            cruiseCtrlAcv = 1;  // Mark assist as active
+            // PWM will be set by state handler, enable after initial values
+            enable = 1;
+            beepShort(50);
+            break;
+            
+        case PCC_STATE_COASTING:
+            ctrlModReq = TRQ_MODE;
+            // Silent transition, keep motors enabled
+            break;
+            
+        case PCC_STATE_RAMP_DOWN:
+            ctrlModReq = TRQ_MODE;
+            beepShort(40);  // Disengage beep
+            break;
+    }
+    
+    pcc.state = newState;
+    pcc.stateEntryTime = now;
+}
+
+/*******************************************************************************
+ * PCC Initialization
+ ******************************************************************************/
+static void PCC_Init(void)
+{
+    pcc.state = PCC_STATE_IDLE;
+    pcc.stateEntryTime = HAL_GetTick();
+    pcc.idleEntryTime = HAL_GetTick();
+    pcc.targetL = 0;
+    pcc.targetR = 0;
+    pcc.lastSpeedL = 0;
+    pcc.lastSpeedR = 0;
+    pcc.initialized = 1;
+    
+    enable = 0;
+    rtP_Left.b_cruiseCtrlEna = 0;
+    rtP_Right.b_cruiseCtrlEna = 0;
+    pwml = pwmr = 0;
+    cruiseCtrlAcv = 0;
+    ctrlModReq = OPEN_MODE;  // Allow freewheeling when idle
+}
+
+/*******************************************************************************
+ * PCC Main Update - Industry Best Practice Implementation
+ * 
+ * Key behaviors:
+ * 1. TRACKING: Motor matches user's current speed (doesn't fight acceleration)
+ * 2. COASTING: When user releases, briefly maintains last speed
+ * 3. Hysteresis: Different thresholds for engage vs disengage
+ * 4. Cooldown: Prevents rapid on/off cycling
+ ******************************************************************************/
+static void handleStatePushCruiseControl(void)
+{
+    if (pcc_needs_reset || !pcc.initialized) {
+        PCC_Init();
         pcc_needs_reset = 0;
-        return;  // Skip this iteration
+        return;
     }
-
-    // FIX PCC-1: Initialize start_time_tick on first run to prevent immediate activation
-    if (first_run) {
-        start_time_tick = time_tick;
-        first_run = 0;
-        return;  // Skip this iteration to ensure proper timing
-    }
-
-    switch (cc_state) {
-        case 0:
-            // Enable == 0, measure current speed for 1 second and get average and set cruise ctrl
-            // Enable after timeout
-            if (time_tick - start_time_tick > 1000 * TICKS_1MS) {
-                start_time_tick = time_tick;
-                
-                // Calculate averages with proper signed arithmetic
-                int16_t calcAvgL = (avgCtr > 0) ? (int16_t)(avgL / (int32_t)avgCtr) : 0;
-                int16_t calcAvgR = (avgCtr > 0) ? (int16_t)(avgR / (int32_t)avgCtr) : 0;
-                
-                // FIX PCC-4: Only enable if wheels are actually moving (minimum speed threshold)
-                #define PCC_MIN_SPEED_RPM 80  // Minimum RPM to consider as "moving"
-                if (ABS(calcAvgL) > PCC_MIN_SPEED_RPM && ABS(calcAvgR) > PCC_MIN_SPEED_RPM) {
-                    enable = 1;
-                    cruiseControlSpd(1, calcAvgR, calcAvgL);
-                    cc_state = 1;
-                }
-                // Reset accumulators regardless
-                avgCtr = 0;
-                avgL = 0;
-                avgR = 0;
-            } else {
-                if (enable) {
-                    enable = 0;
-                    avgCtr = 0;
-                    avgL = 0;
-                    avgR = 0;
-                }
-                // FIX PCC-3: Explicitly disable cruise control instead of toggle
-                if (rtP_Left.b_cruiseCtrlEna) {
-                    rtP_Left.b_cruiseCtrlEna = 0;
-                    rtP_Right.b_cruiseCtrlEna = 0;
-                    avgCtr = 0;
-                    avgL = 0;
-                    avgR = 0;
-                }
-
-                avgCtr++;
-                avgL += rtY_Left.n_mot;   // Now safe: int32_t += int16_t
-                avgR += rtY_Right.n_mot;
+    
+    uint32_t now = HAL_GetTick();
+    uint32_t timeInState = now - pcc.stateEntryTime;
+    
+    // Get current motor speeds (right motor has reversed polarity)
+    int16_t actualL = rtY_Left.n_mot;
+    int16_t actualR = -rtY_Right.n_mot;
+    int16_t absAvgSpeed = (ABS(actualL) + ABS(actualR)) / 2;
+    
+    // Detect if user is actively accelerating (comparing to last loop)
+    // FIX: Check if MAGNITUDE is increasing (works for both forward and reverse)
+    // Old bug: only detected positive acceleration, not negative (reverse direction)
+    int16_t absLastL = ABS(pcc.lastSpeedL);
+    int16_t absLastR = ABS(pcc.lastSpeedR);
+    uint8_t isAccelerating = (ABS(actualL) > absLastL + PCC_ACCEL_THRESHOLD) || 
+                             (ABS(actualR) > absLastR + PCC_ACCEL_THRESHOLD);
+    
+    // Calculate ramp rate (RPM per loop iteration)
+    int16_t rampStep = (PCC_RAMP_RATE_RPM_PER_SEC * DELAY_IN_MAIN_LOOP) / 1000;
+    if (rampStep < 1) rampStep = 1;
+    
+    // Save for next iteration's acceleration detection
+    pcc.lastSpeedL = actualL;
+    pcc.lastSpeedR = actualR;
+    
+    switch (pcc.state) {
+        
+        /*-----------------------------------------------------------------
+         * IDLE: Motors off, waiting for user to push above threshold
+         * Uses OPEN_MODE to allow freewheeling (SPD_MODE would resist movement)
+         *-----------------------------------------------------------------*/
+        case PCC_STATE_IDLE:
+            enable = 0;
+            pwml = pwmr = 0;
+            ctrlModReq = OPEN_MODE;  // Freewheel - don't resist manual movement
+            
+            // Check for engage (with cooldown to prevent rapid cycling)
+            if (absAvgSpeed > PCC_ENGAGE_SPEED_RPM && 
+                (now - pcc.idleEntryTime) > PCC_COOLDOWN_MS) {
+                // Start tracking immediately at current speed
+                pcc.targetL = PCC_Clamp(actualL, -PCC_MAX_SPEED_RPM, PCC_MAX_SPEED_RPM);
+                pcc.targetR = PCC_Clamp(actualR, -PCC_MAX_SPEED_RPM, PCC_MAX_SPEED_RPM);
+                PCC_EnterState(PCC_STATE_TRACKING);
             }
             break;
-        case 1:
-            if (time_tick - start_time_tick > 3000 * TICKS_1MS) {
-                start_time_tick = time_tick;
-                cc_state = 0;
+            
+        /*-----------------------------------------------------------------
+         * TRACKING: TORQUE-BASED ASSIST (TRQ_MODE)
+         * 
+         * In TRQ_MODE, PWM controls motor CURRENT (torque) directly.
+         * We apply a constant assist torque in the DIRECTION of movement:
+         *   - Wheel spinning forward → positive torque (helps push forward)
+         *   - Wheel spinning backward → negative torque (helps push backward)
+         * 
+         * This approach:
+         * ✓ Never fights the user (torque is always in direction of travel)
+         * ✓ Doesn't care about exact speed (no back-EMF issues)
+         * ✓ Naturally assists acceleration (constant force = acceleration)
+         * ✓ Doesn't fight deceleration (when user slows, assist reduces)
+         * 
+         * WHY NOT VLT_MODE: Voltage mode requires exceeding back-EMF.
+         * At 50 RPM, we'd need ~500+ PWM. Setting pwml=50 causes BRAKING!
+         *-----------------------------------------------------------------*/
+        case PCC_STATE_TRACKING:
+            ctrlModReq = TRQ_MODE;  // CRITICAL: Torque mode, not voltage!
+            enable = 1;
+            
+            {
+                // Choose assist level based on acceleration
+                int16_t assistTorque = isAccelerating ? PCC_ASSIST_TORQUE_ACCEL : PCC_ASSIST_TORQUE_BASE;
+                
+                // SAFETY: Reduce assist at high speeds to prevent runaway
+                // As we approach max speed, taper off the assist
+                if (absAvgSpeed > PCC_MAX_SPEED_RPM) {
+                    assistTorque = 0;  // No more assist above max
+                } else if (absAvgSpeed > PCC_MAX_SPEED_RPM - 30) {
+                    // Taper off in the last 30 RPM before max
+                    int16_t margin = PCC_MAX_SPEED_RPM - absAvgSpeed;  // 0-30
+                    assistTorque = (assistTorque * margin) / 30;
+                }
+                
+                // Clamp to safety limit
+                if (assistTorque > PCC_ASSIST_TORQUE_MAX) {
+                    assistTorque = PCC_ASSIST_TORQUE_MAX;
+                }
+                
+                // Apply torque in DIRECTION of wheel movement
+                // Left motor: positive speed → positive torque
+                if (actualL > PCC_DISENGAGE_SPEED_RPM) {
+                    pwml = assistTorque;       // Assist forward
+                } else if (actualL < -PCC_DISENGAGE_SPEED_RPM) {
+                    pwml = -assistTorque;      // Assist backward
+                } else {
+                    pwml = 0;                  // Too slow - no assist
+                }
+                
+                // Right motor: note reversed polarity in speed reading
+                // actualR is already corrected, but PWM needs negation
+                if (actualR > PCC_DISENGAGE_SPEED_RPM) {
+                    pwmr = -assistTorque;      // Assist forward (negated for right motor)
+                } else if (actualR < -PCC_DISENGAGE_SPEED_RPM) {
+                    pwmr = assistTorque;       // Assist backward (negated for right motor)
+                } else {
+                    pwmr = 0;
+                }
+                
+                // Track last speed for state transitions
+                pcc.targetL = actualL;
+                pcc.targetR = actualR;
+            }
+            
+            // No cruise control - we're using direct torque
+            rtP_Left.b_cruiseCtrlEna = 0;
+            rtP_Right.b_cruiseCtrlEna = 0;
+            
+            // Transition to COASTING if user stops actively pushing
+            // This prevents continuous assist from becoming runaway
+            if (!isAccelerating && timeInState > 500) {
+                PCC_EnterState(PCC_STATE_COASTING);
+            }
+            // Safety: disengage if speed drops below threshold
+            else if (absAvgSpeed < PCC_DISENGAGE_SPEED_RPM) {
+                PCC_EnterState(PCC_STATE_RAMP_DOWN);
             }
             break;
+            
+        /*-----------------------------------------------------------------
+         * COASTING: User has released but wheel still moving
+         * - Minimal assist to maintain momentum (NOT accelerate!)
+         * - Returns to TRACKING if user pushes again
+         * - Times out to RAMP_DOWN after PCC_HOLD_TIME_MS
+         * 
+         * The reduced torque ensures we don't keep accelerating when
+         * user wants to coast/stop. Just enough to maintain speed.
+         *-----------------------------------------------------------------*/
+        case PCC_STATE_COASTING:
+            ctrlModReq = TRQ_MODE;
+            enable = 1;
+            
+            {
+                // MINIMAL assist during coast - just enough to fight friction
+                // This should NOT be enough to accelerate the wheel
+                int16_t assistTorque = PCC_ASSIST_TORQUE_BASE / 3;  // ~27 out of 1000
+                
+                // Further reduce at higher speeds (speed limit)
+                if (absAvgSpeed > PCC_MAX_SPEED_RPM) {
+                    assistTorque = 0;
+                } else if (absAvgSpeed > PCC_MAX_SPEED_RPM - 30) {
+                    int16_t margin = PCC_MAX_SPEED_RPM - absAvgSpeed;
+                    assistTorque = (assistTorque * margin) / 30;
+                }
+                
+                // Apply torque in direction of movement
+                if (actualL > PCC_DISENGAGE_SPEED_RPM) {
+                    pwml = assistTorque;
+                } else if (actualL < -PCC_DISENGAGE_SPEED_RPM) {
+                    pwml = -assistTorque;
+                } else {
+                    pwml = 0;
+                }
+                
+                if (actualR > PCC_DISENGAGE_SPEED_RPM) {
+                    pwmr = -assistTorque;
+                } else if (actualR < -PCC_DISENGAGE_SPEED_RPM) {
+                    pwmr = assistTorque;
+                } else {
+                    pwmr = 0;
+                }
+                
+                pcc.targetL = actualL;
+                pcc.targetR = actualR;
+            }
+            
+            rtP_Left.b_cruiseCtrlEna = 0;
+            rtP_Right.b_cruiseCtrlEna = 0;
+            
+            // Check if user started pushing again → back to TRACKING
+            if (isAccelerating) {
+                PCC_EnterState(PCC_STATE_TRACKING);
+                break;
+            }
+            
+            // Exit conditions
+            if (absAvgSpeed < PCC_DISENGAGE_SPEED_RPM) {
+                PCC_EnterState(PCC_STATE_RAMP_DOWN);
+            } else if (timeInState >= PCC_HOLD_TIME_MS) {
+                // Coast timeout - user hasn't pushed, start disengaging
+                PCC_EnterState(PCC_STATE_RAMP_DOWN);
+            }
+            break;
+            
+        /*-----------------------------------------------------------------
+         * RAMP_DOWN: Gracefully reduce motor assist to zero
+         * Uses a time-based ramp down of assist torque
+         *-----------------------------------------------------------------*/
+        case PCC_STATE_RAMP_DOWN:
+            ctrlModReq = TRQ_MODE;
+            enable = 1;
+            
+            {
+                // Calculate remaining assist based on time in ramp down
+                // Ramp from PCC_ASSIST_TORQUE_BASE to 0 over ~500ms
+                int16_t remainingTorque = PCC_ASSIST_TORQUE_BASE - 
+                    (int16_t)((timeInState * PCC_ASSIST_TORQUE_BASE) / 500);
+                
+                if (remainingTorque < 0) remainingTorque = 0;
+                
+                // Apply remaining torque in direction of movement
+                if (actualL > PCC_DISENGAGE_SPEED_RPM) {
+                    pwml = remainingTorque;
+                } else if (actualL < -PCC_DISENGAGE_SPEED_RPM) {
+                    pwml = -remainingTorque;
+                } else {
+                    pwml = 0;
+                }
+                
+                if (actualR > PCC_DISENGAGE_SPEED_RPM) {
+                    pwmr = -remainingTorque;
+                } else if (actualR < -PCC_DISENGAGE_SPEED_RPM) {
+                    pwmr = remainingTorque;
+                } else {
+                    pwmr = 0;
+                }
+                
+                // When torque is zero, transition to IDLE
+                if (remainingTorque == 0) {
+                    PCC_EnterState(PCC_STATE_IDLE);
+                }
+            }
+            
+            rtP_Left.b_cruiseCtrlEna = 0;
+            rtP_Right.b_cruiseCtrlEna = 0;
+            break;
+            
         default:
+            PCC_EnterState(PCC_STATE_IDLE);
             break;
     }
 }
@@ -726,15 +1053,24 @@ int handleSwitchStateReq(int state, uint8_t *pabortrock)
     }
     switch (state) {
         case 0:
-            beepShort(30);
-            beepShort(45);
+            // Entering Push Cruise Control mode
             *pabortrock = 1;
             enable = 0;
-            // FIX PCC-RESET: Mark that PCC needs initialization when we enter this state
-            pcc_needs_reset = 1;
-            // Also disable cruise control explicitly when leaving other modes
+            
+            // Disable any active cruise control from previous state
             rtP_Left.b_cruiseCtrlEna = 0;
             rtP_Right.b_cruiseCtrlEna = 0;
+            
+            // Reset PWM outputs
+            pwml = pwmr = 0;
+            cmdL = cmdR = 0;
+            
+            // Initialize PCC state machine
+            pcc_needs_reset = 1;
+            
+            // Audio feedback moved to PCC_Init via state entry
+            beepShort(30);
+            beepShort(45);
             break;
         case 1:
             // First disable motors while we reset everything
