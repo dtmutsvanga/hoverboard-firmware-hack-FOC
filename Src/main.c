@@ -192,9 +192,9 @@ static uint8_t pcc_needs_reset = 0;
  * - Never fights user: torque is always in direction of travel
  * - No back-EMF issues: torque mode bypasses voltage control
  */
-#define PCC_ENGAGE_SPEED_RPM        5      // Speed to START assist
-#define PCC_DISENGAGE_SPEED_RPM     2       // Speed to STOP assist (hysteresis)
-#define PCC_MAX_SPEED_RPM           150     // Maximum allowed assist speed
+#define PCC_ENGAGE_SPEED_RPM        25      // Speed to START assist
+#define PCC_DISENGAGE_SPEED_RPM     15       // Speed to STOP assist (hysteresis)
+#define PCC_MAX_SPEED_RPM           120     // Maximum allowed assist speed
 #define PCC_HOLD_TIME_MS            10000    // Max coast time after user releases
 #define PCC_RAMP_RATE_RPM_PER_SEC   200     // How fast motor ramps (RPM per second)
 #define PCC_COOLDOWN_MS             500     // Minimum time in IDLE before re-engaging
@@ -204,7 +204,7 @@ static uint8_t pcc_needs_reset = 0;
 // In TRQ_MODE, PWM controls motor current (torque) directly, range -1000 to +1000
 // We apply a CONSTANT assist torque in the direction of wheel movement
 // This doesn't care about exact speed - just adds gentle push in direction of travel
-#define PCC_ASSIST_TORQUE_BASE      (80 * 4)      // Base assist (out of 1000), ~8% - gentle push
+#define PCC_ASSIST_TORQUE_BASE      (80 * 3)      // Base assist (out of 1000), ~8% - gentle push
 #define PCC_ASSIST_TORQUE_ACCEL     150     // Assist when accelerating - stronger pull
 #define PCC_ASSIST_TORQUE_MAX       200     // Maximum assist torque (safety limit)
 
