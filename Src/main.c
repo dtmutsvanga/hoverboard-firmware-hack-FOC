@@ -170,6 +170,9 @@ static MultipleTap MultipleTapBrake; // define multiple tap functionality for th
 
 static uint16_t rate = RATE; // Adjustable rate to support multiple drive modes on startup
 
+// Static variable to track PCC (Push Cruise Control) state reset - needs to be reset when entering State 0
+static uint8_t pcc_needs_reset = 0;
+
 #ifdef MULTI_MODE_DRIVE
 static uint8_t drive_mode;
 static uint16_t max_speed;
@@ -205,23 +208,34 @@ static uint16_t moveTime = STRT_MOVE_TIME_ms;
 static uint16_t maxSpeed = STRT_MAX_SPEED;
 static uint32_t lastRegulationTime = 0;
 static int16_t currAvgSpeed = 0;
-static uint16_t currAbsAvgSpeed = 0;
-static int32_t currDisplacement = 0;
 
+/**
+ * @brief Calculate cumulative wheel displacement
+ * @param reset: 1 = reset displacement to zero, 0 = accumulate
+ * @return Current displacement in milli-rotations
+ * @note 1000 milli-rotations = 1 full wheel rotation
+ */
 static int32_t calcDispacement(uint8_t reset)
 {
     static int32_t _currDisplacement = 0;
-    static int32_t prevTime = 0;
+    static uint32_t prevTime = 0;  // FIX BR-3: Changed to uint32_t for consistency
 
     if (reset) {
         _currDisplacement = 0;
         prevTime = HAL_GetTick();
+        return 0;
     }
 
     uint32_t currTm = HAL_GetTick();
-    /* S = avgV * t */
-    _currDisplacement += currAvgSpeed * (currTm - prevTime);
-    currDisplacement = _currDisplacement;
+    uint32_t dt_ms = currTm - prevTime;
+    
+    // FIX BR-3: Correct unit conversion
+    // Result in milli-rotations: (RPM * ms) / 60 = milli-rotations
+    // Prevent division issues and overflow with sanity check
+    if (dt_ms > 0 && dt_ms < 1000) {  // < 1 second sanity check
+        _currDisplacement += ((int32_t)currAvgSpeed * (int32_t)dt_ms) / 60;
+    }
+    
     prevTime = currTm;
     return _currDisplacement;
 }
@@ -234,48 +248,56 @@ static int16_t speedSinus(uint8_t reset)
 
     static uint16_t _moveTime = DEFAULT_MOVE_TIME;
     static uint16_t _maxSpeed = DEFAULT_SPEED;
-    static int32_t currDis = 0;
     static uint8_t first = 1;
+    
     if (reset) {
         lastTime = 0;
         prevSpd = 0;
         startTime = HAL_GetTick();
-        _moveTime = moveTime; // = STRT_MOVE_TIME_ms;
-        _maxSpeed = maxSpeed; // = STRT_MAX_SPEED;
-        currDis = 0;
+        _moveTime = moveTime;
+        _maxSpeed = maxSpeed;
         first = 1;
     }
+    
+    // Handle startup delay - return zero speed during this period
     if (first) {
         if (HAL_GetTick() - startTime > STRT_ROCKER_DELAY) {
-            startTime = HAL_GetTick();
+            startTime = HAL_GetTick();  // Synchronize cycle start after delay
             first = 0;
+        } else {
+            return 0;  // Return zero during startup delay for safety
         }
     }
 
-    currDis = currDisplacement;
     uint32_t tm = HAL_GetTick();
+    
+    // Rate limit updates
     if (tm - lastTime < SPD_UPD_TM_ms && lastTime > 0) {
         return prevSpd;
     }
     lastTime = tm;
-    // tm = tm == 0? 0 : (tm - startTime) % _moveTime;
-    float angle = 2.0 * 3.141593;
-    angle = angle * (float)tm / (float)_moveTime;
+    
+    // FIX BR-1: Calculate RELATIVE time within period (not absolute time!)
+    // This ensures the sine wave is periodic and predictable
+    uint32_t relative_tm = (tm - startTime) % _moveTime;
+    
+    float angle = 2.0f * 3.141593f * (float)relative_tm / (float)_moveTime;
     float spd_f = cosf(angle);
     prevSpd = (int16_t)(spd_f * (float)(_maxSpeed)); /* Amplitude */
 
-    /* only update parameters at the end / start of a cycle */
-    if (speed >= 0 && speed < 20) /* less than 5% of the estimated maximum displacement (area under
-                                     triangle in half-wave)*/
+    // FIX BR-2: Check LOCAL variable prevSpd (not global speed) for zero-crossing
+    // FIX BR-5: Use != instead of XOR for inequality check (better readability)
+    /* Only update parameters at the end/start of a cycle (near zero crossing) */
+    int16_t threshold = (int16_t)(_maxSpeed / 20);  // 5% of max speed
+    if (prevSpd >= 0 && prevSpd < threshold)
     {
-        if ((_moveTime ^ moveTime) || (_maxSpeed ^ maxSpeed)) {
+        if ((_moveTime != moveTime) || (_maxSpeed != maxSpeed)) {
             _moveTime = moveTime;
             _maxSpeed = maxSpeed;
             startTime = HAL_GetTick();
             lastTime = 0;
             prevSpd = 0;
-            first = 1;
-            // currDis = 0;
+            // Note: Don't reset first here - we want smooth parameter transitions
         }
     }
     return prevSpd;
@@ -302,7 +324,6 @@ static void setDcLinkCurrent(void)
 
 static void updateSpeedGlobals()
 {
-    currAbsAvgSpeed = getAbsSpeed();
     currAvgSpeed = getSpeed();
 }
 
@@ -495,6 +516,22 @@ static uint8_t isCruiseControlActive(void)
 
 static void handleStateNunChuckSpeedDiffCtrl(void)
 {
+    // ####### DIRECTION CHANGE FIX #######
+    // Reset rate limiter states when joystick is centered (in deadband zone)
+    // The input processing already applies deadband from config.h (PRI_INPUT1/2),
+    // so cmd will be exactly 0 when joystick is in the center deadband zone.
+    // This prevents momentum when changing direction - motors won't briefly
+    // move in old direction before reversing.
+    
+    if (input1[inIdx].cmd == 0) {
+        steerRateFixdt = 0;  // Reset steering rate limiter
+        steerFixdt = 0;      // Reset steering filter
+    }
+    if (input2[inIdx].cmd == 0) {
+        speedRateFixdt = 0;  // Reset speed rate limiter
+        speedFixdt = 0;      // Reset speed filter
+    }
+    
     // ####### LOW-PASS FILTER #######
     rateLimiter16(input1[inIdx].cmd, rate, &steerRateFixdt);
     rateLimiter16(input2[inIdx].cmd, rate, &speedRateFixdt);
@@ -507,17 +544,10 @@ static void handleStateNunChuckSpeedDiffCtrl(void)
     mixerFcn(speed << 4, steer << 4, &cmdR, &cmdL); // This function implements the
                                                     // equations above
 
-    // ####### SET OUTPUTS (if the target change is less than +/- 100) #######
-    //if (abs(cmdR) - abs(cmdL) < 50) {
-    //    pwmr = -cmdR;
-    //    pwml = cmdR;
-    //} else 
-		{
-        pwmr = -cmdR;
-        pwml = cmdL;
-    }
-
-   
+    // ####### SET OUTPUTS #######
+    // Note: Right motor wired with reverse polarity, hence cmdR is negated
+    pwmr = -cmdR;
+    pwml = cmdL;
 }
 
 static void handleStateBabyRocker(int *pstate, uint8_t *pabortrock)
@@ -611,22 +641,48 @@ static void handleStatePushCruiseControl()
 {
     static int cc_state = 0;
     static uint32_t start_time_tick = 0;
-    static uint32_t avgL=  0, avgR = 0;
+    static int32_t avgL = 0, avgR = 0;   // FIX PCC-2: Changed to int32_t for signed motor speeds
     static uint32_t avgCtr = 0;
+    static uint8_t first_run = 1;        // FIX PCC-1: Track first run for proper initialization
+
+    // Check if we need to reset state (when entering State 0 from another state)
+    if (pcc_needs_reset) {
+        cc_state = 0;
+        start_time_tick = time_tick;
+        avgL = 0;
+        avgR = 0;
+        avgCtr = 0;
+        first_run = 0;  // Already initialized now
+        pcc_needs_reset = 0;
+        return;  // Skip this iteration
+    }
+
+    // FIX PCC-1: Initialize start_time_tick on first run to prevent immediate activation
+    if (first_run) {
+        start_time_tick = time_tick;
+        first_run = 0;
+        return;  // Skip this iteration to ensure proper timing
+    }
 
     switch (cc_state) {
         case 0:
-            // Enable == 0, measure current speed for 1 second and get average and set cuise ctrl
+            // Enable == 0, measure current speed for 1 second and get average and set cruise ctrl
             // Enable after timeout
             if (time_tick - start_time_tick > 1000 * TICKS_1MS) {
                 start_time_tick = time_tick;
-                enable = 1;
-                if (avgCtr) {
-                    avgR /= avgCtr;
-                    avgL /= avgCtr;
+                
+                // Calculate averages with proper signed arithmetic
+                int16_t calcAvgL = (avgCtr > 0) ? (int16_t)(avgL / (int32_t)avgCtr) : 0;
+                int16_t calcAvgR = (avgCtr > 0) ? (int16_t)(avgR / (int32_t)avgCtr) : 0;
+                
+                // FIX PCC-4: Only enable if wheels are actually moving (minimum speed threshold)
+                #define PCC_MIN_SPEED_RPM 80  // Minimum RPM to consider as "moving"
+                if (ABS(calcAvgL) > PCC_MIN_SPEED_RPM && ABS(calcAvgR) > PCC_MIN_SPEED_RPM) {
+                    enable = 1;
+                    cruiseControlSpd(1, calcAvgR, calcAvgL);
+                    cc_state = 1;
                 }
-                cruiseControlSpd(1, avgR, avgL);
-                cc_state = 1;
+                // Reset accumulators regardless
                 avgCtr = 0;
                 avgL = 0;
                 avgR = 0;
@@ -637,15 +693,17 @@ static void handleStatePushCruiseControl()
                     avgL = 0;
                     avgR = 0;
                 }
+                // FIX PCC-3: Explicitly disable cruise control instead of toggle
                 if (rtP_Left.b_cruiseCtrlEna) {
-                    cruiseControl(1);
+                    rtP_Left.b_cruiseCtrlEna = 0;
+                    rtP_Right.b_cruiseCtrlEna = 0;
                     avgCtr = 0;
                     avgL = 0;
                     avgR = 0;
                 }
 
                 avgCtr++;
-                avgL += rtY_Left.n_mot;
+                avgL += rtY_Left.n_mot;   // Now safe: int32_t += int16_t
                 avgR += rtY_Right.n_mot;
             }
             break;
@@ -660,7 +718,6 @@ static void handleStatePushCruiseControl()
     }
 }
 
-
 int handleSwitchStateReq(int state, uint8_t *pabortrock)
 {
     state++;
@@ -673,16 +730,51 @@ int handleSwitchStateReq(int state, uint8_t *pabortrock)
             beepShort(45);
             *pabortrock = 1;
             enable = 0;
+            // FIX PCC-RESET: Mark that PCC needs initialization when we enter this state
+            pcc_needs_reset = 1;
+            // Also disable cruise control explicitly when leaving other modes
+            rtP_Left.b_cruiseCtrlEna = 0;
+            rtP_Right.b_cruiseCtrlEna = 0;
             break;
         case 1:
-            enable = 1;
+            // First disable motors while we reset everything
+            enable = 0;
+            
+            // Disable any active cruise control from previous state
+            rtP_Left.b_cruiseCtrlEna = 0;
+            rtP_Right.b_cruiseCtrlEna = 0;
+            
+            // FIX NC-3: Reset filters to prevent initial jump when entering mode
+            steerFixdt = speedFixdt = 0;
+            steerRateFixdt = speedRateFixdt = 0;
+            
+            // Reset PWM outputs and commands to zero
+            pwml = pwmr = 0;
+            cmdL = cmdR = 0;
+            
             beepShort(60);
             beepShort(62);
-            //state = !state; /* Go back to previous states */
             *pabortrock = 1;
+            
+            // Now enable motors - they'll start from zero
+            enable = 1;
             break;
         case 2:
-            enable = 1;
+            // First disable motors while we reset everything
+            enable = 0;
+            
+            // Disable any active cruise control from previous state
+            rtP_Left.b_cruiseCtrlEna = 0;
+            rtP_Right.b_cruiseCtrlEna = 0;
+            
+            // Reset filters for baby rocker mode
+            steerFixdt = speedFixdt = 0;
+            steerRateFixdt = speedRateFixdt = 0;
+            
+            // Reset PWM outputs and commands to zero
+            pwml = pwmr = 0;
+            cmdL = cmdR = 0;
+            
             *pabortrock = 0;
             rockerEnable = 1;
             beepShort(62);
@@ -690,6 +782,9 @@ int handleSwitchStateReq(int state, uint8_t *pabortrock)
             lastRegulationTime = HAL_GetTick();
             speedSinus(1);      /* Reset the speed */
             calcDispacement(1); /* Reset the displacement calculation */
+            
+            // Now enable motors - they'll start from zero
+            enable = 1;
             break;
     }
     return state;
@@ -746,10 +841,11 @@ int main(void)
                         handleCruiseControlActivate(currBtnStateZ != btnStateZ);
                     }
 #endif /* CRUISE_CONTROL_SUPPORT */
-                    /* Disable motors on button no input (free wheeling) */
+                    /* Disable motors on no input (free wheeling) */
                     if(!isCruiseControlActive())
                     {
-                        if(input1[0].cmd == 0 && input2[0].cmd == 0)
+                        // FIX NC-1: Use inIdx instead of hardcoded 0 for proper dual-input support
+                        if(input1[inIdx].cmd == 0 && input2[inIdx].cmd == 0)
                         {
                             if (enable) {
                                 enable = 0;
