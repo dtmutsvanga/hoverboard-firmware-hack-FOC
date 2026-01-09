@@ -231,6 +231,23 @@
 
 
 
+// ############################### PUSH-ASSIST PARAMETERS ###############################
+// Push-assist mode for stroller application: provides constant torque assist when wheels are pushed
+// The system engages when wheel speed exceeds engage threshold and disengages below disengage threshold
+// Hysteresis (engage > disengage) prevents oscillation between on/off states
+
+#define PA_ENGAGE_NORMAL      20      // [RPM] Normal mode engage threshold - assist starts after clear movement
+#define PA_DISENGAGE_NORMAL   10      // [RPM] Normal mode disengage threshold - 10 RPM hysteresis prevents oscillation
+#define PA_ENGAGE_EAGER       3       // [RPM] Eager mode engage threshold - instant response when user requests via nunchuk
+#define PA_DISENGAGE_EAGER    2       // [RPM] Eager mode disengage threshold - minimal hysteresis for responsive feel
+#define PA_SPEED_CAP          170     // [RPM] Maximum assisted speed (~6.5 kph walking pace, safety limit)
+#define PA_TORQUE_BASE        150     // Base assist torque (of 1000) - ~2.5A effective, noticeable but easily overpowered
+#define PA_TORQUE_MAX         300     // Maximum assist torque (of 1000) - ~5A effective, strong assist for inclines
+#define PA_NUNCHUK_DEADBAND   10      // Nunchuk Y-axis deadband - filters noise when joystick is centered
+// ######################### END OF PUSH-ASSIST PARAMETERS ############################
+
+
+
 // ############################### DEBUG SERIAL ###############################
 /* Connect GND and RX of a 3.3v uart-usb adapter to the left (USART2) or right sensor board cable (USART3)
  * Be careful not to use the red wire of the cable. 15v will destroy everything.
