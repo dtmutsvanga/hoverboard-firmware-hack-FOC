@@ -48,6 +48,6 @@ development_status:
 
   # Epic 2: Nunchuk Boost & Safety
   epic-2: in-progress
-  2-1-nunchuk-boost-eager-mode: in-progress
+  2-1-nunchuk-boost-eager-mode: review
   2-2-safe-defaults-on-disconnect: ready-for-dev
   epic-2-retrospective: optional

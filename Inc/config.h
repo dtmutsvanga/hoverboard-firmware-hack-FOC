@@ -244,7 +244,8 @@
 //#define PA_DISABLE_SPEED_CAP       // Uncomment to disable speed cap (for testing only - USE WITH CAUTION)
 #define PA_TORQUE_BASE        220     // Base assist torque (of 1000) - ~2.5A effective, noticeable but easily overpowered
 #define PA_TORQUE_MAX         440    // Maximum assist torque (of 1000) - ~5A effective, strong assist for inclines
-#define PA_NUNCHUK_DEADBAND   10      // Nunchuk Y-axis deadband - filters noise when joystick is centered
+#define PA_NUNCHUK_DEADBAND   40      // Nunchuk Y-axis deadband - filters noise when joystick is centered
+#define PA_DISABLE_NUNCHUK            // Uncomment to disable nunchuk boost control (constant torque only)
 // ######################### END OF PUSH-ASSIST PARAMETERS ############################
 
 
