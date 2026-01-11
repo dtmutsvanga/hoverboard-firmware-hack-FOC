@@ -640,13 +640,11 @@ static void handleStateBabyRocker(int *pstate, uint8_t *pabortrock)
 }
 
 /*******************************************************************************
- * Push-Assist Control with Nunchuk Boost & Eager Mode (Story 2.1)
+ * Push-Assist Control - Constant Torque with Optional Nunchuk Boost
  *
- * Algorithm: When moving above engage threshold, apply assist torque in
- * direction of travel. Disengage below disengage threshold (hysteresis).
- *
- * Normal mode (nunchuk centered): 20/10 RPM thresholds, base torque
- * Eager mode (nunchuk forward):   3/2 RPM thresholds, variable torque boost
+ * Algorithm: When moving above engage threshold, apply constant assist torque
+ * in direction of travel. Disengage below disengage threshold (hysteresis).
+ * Freewheel when stopped or above speed cap.
  ******************************************************************************/
 static void handleStatePushCruiseControl(void)
 {
@@ -655,25 +653,27 @@ static void handleStatePushCruiseControl(void)
     // Get average speed from Hall sensors
     int16_t abs_speed = ABS(speedAvg);
 
-#ifdef PA_DISABLE_NUNCHUK
-    // Nunchuk control disabled - use Normal mode only
-    int16_t nunchuk_y = 0;
-    uint8_t nunchuk_active = 0;
-#else
-    // Read nunchuk Y-axis from processed input (deadband already applied)
-    // input2[inIdx].cmd: 0 when centered, positive when pushed forward
+    // Determine thresholds and torque
+    int16_t engage = PA_ENGAGE_NORMAL;
+    int16_t disengage = PA_DISENGAGE_NORMAL;
+    int16_t torque = PA_TORQUE_BASE;
+
+#ifndef PA_DISABLE_NUNCHUK
+    // Nunchuk boost: read Y-axis for Eager mode
     int16_t nunchuk_y = input2[inIdx].cmd;
-    if (nunchuk_y < 0) nunchuk_y = 0;  // Only use forward push
+    if (nunchuk_y < 0) nunchuk_y = 0;
 
-    // Determine if nunchuk is requesting boost (Eager mode)
-    // Use threshold to prevent jitter from small input fluctuations
-    // PA_NUNCHUK_DEADBAND (10) scaled by 8 for cmd space ≈ 80
-    uint8_t nunchuk_active = (nunchuk_y > (PA_NUNCHUK_DEADBAND * 8));
+    // Check if nunchuk is pushed forward past threshold
+    if (nunchuk_y > (PA_NUNCHUK_DEADBAND * 8)) {
+        // Eager mode: lower thresholds, variable torque
+        engage = PA_ENGAGE_EAGER;
+        disengage = PA_DISENGAGE_EAGER;
+        // Proportional torque boost
+        int16_t boost_range = PA_TORQUE_MAX - PA_TORQUE_BASE;
+        torque = PA_TORQUE_BASE + (nunchuk_y * boost_range) / 500;
+        if (torque > PA_TORQUE_MAX) torque = PA_TORQUE_MAX;
+    }
 #endif
-
-    // Select thresholds based on mode
-    int16_t engage = nunchuk_active ? PA_ENGAGE_EAGER : PA_ENGAGE_NORMAL;
-    int16_t disengage = nunchuk_active ? PA_DISENGAGE_EAGER : PA_DISENGAGE_NORMAL;
 
     // Hysteresis logic: engage at higher threshold, disengage at lower
 #ifdef PA_DISABLE_SPEED_CAP
@@ -692,7 +692,7 @@ static void handleStatePushCruiseControl(void)
 
     // Apply assist or freewheel based on state
     if (assist_active) {
-        // ASSIST MODE: Apply torque in direction of travel
+        // ASSIST MODE: Apply constant torque in direction of travel
         ctrlModReq = TRQ_MODE;
         enable = 1;
 
@@ -705,17 +705,6 @@ static void handleStatePushCruiseControl(void)
         rtP_Left.n_max = PA_SPEED_CAP << 4; // Use PA speed cap limit
         rtP_Right.n_max = PA_SPEED_CAP << 4;
 #endif
-
-        // Calculate torque with optional boost
-        int16_t torque = PA_TORQUE_BASE;
-        if (nunchuk_active) {
-            // Proportional boost based on joystick position
-            // nunchuk_y ranges 0 to ~768 (from input processing)
-            // Scale so full boost is reached at ~500 cmd value
-            int16_t boost_range = PA_TORQUE_MAX - PA_TORQUE_BASE;
-            torque = PA_TORQUE_BASE + (nunchuk_y * boost_range) / 500;
-            if (torque > PA_TORQUE_MAX) torque = PA_TORQUE_MAX;
-        }
 
         // Apply torque in direction of travel (follows speed sign)
         // Note: pwml/pwmr set directly (not cmdL/cmdR) - state 0 has no mixer

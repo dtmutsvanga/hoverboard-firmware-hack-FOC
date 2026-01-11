@@ -154,9 +154,9 @@
 // Limitation settings 
 // For 25kg stroller on 8" wheels: 3-4A gives ~1-2 Nm torque per motor
 // This is enough to assist but weak enough to easily stop by hand
-#define I_MOT_MAX       4                    // [A] Maximum single motor current limit (was 15A, reduced for stroller)
-#define I_DC_MAX        6                    // [A] Maximum stage2 DC Link current limit (I_MOT_MAX + 2A)
-#define N_MOT_MAX       750                  // [rpm] Maximum motor speed limit (was 500, reduced for walking pace)
+#define I_MOT_MAX       8                    // [A] Maximum single motor current limit (was 15A, reduced for stroller)
+#define I_DC_MAX        10                   // [A] Maximum stage2 DC Link current limit (I_MOT_MAX + 2A)
+#define N_MOT_MAX       750          // [rpm] Maximum motor speed limit (was 500, reduced for walking pace)
 
 // Field Weakening / Phase Advance
 #define FIELD_WEAK_ENA  0               // [-] Field Weakening / Phase Advance enable flag: 0 = Disabled (default), 1 = Enabled
@@ -238,14 +238,16 @@
 
 #define PA_ENGAGE_NORMAL      20      // [RPM] Normal mode engage threshold - assist starts after clear movement
 #define PA_DISENGAGE_NORMAL   10      // [RPM] Normal mode disengage threshold - 10 RPM hysteresis prevents oscillation
-#define PA_ENGAGE_EAGER       3       // [RPM] Eager mode engage threshold - instant response when user requests via nunchuk
+#define PA_ENGAGE_EAGER       5       // [RPM] Eager mode engage threshold - instant response when user requests via nunchuk
 #define PA_DISENGAGE_EAGER    2       // [RPM] Eager mode disengage threshold - minimal hysteresis for responsive feel
-#define PA_SPEED_CAP          170     // [RPM] Maximum assisted speed (~6.5 kph walking pace, safety limit)
-//#define PA_DISABLE_SPEED_CAP       // Uncomment to disable speed cap (for testing only - USE WITH CAUTION)
+#define PA_SPEED_CAP          170 * 4     // [RPM] Maximum assisted speed (~6.5 kph walking pace, safety limit)
 #define PA_TORQUE_BASE        220     // Base assist torque (of 1000) - ~2.5A effective, noticeable but easily overpowered
-#define PA_TORQUE_MAX         440    // Maximum assist torque (of 1000) - ~5A effective, strong assist for inclines
-#define PA_NUNCHUK_DEADBAND   40      // Nunchuk Y-axis deadband - filters noise when joystick is centered
-#define PA_DISABLE_NUNCHUK            // Uncomment to disable nunchuk boost control (constant torque only)
+#define PA_TORQUE_MAX         1000    // Maximum assist torque (of 1000) - ~5A effective, strong assist for inclines
+#define PA_NUNCHUK_DEADBAND   8      // Nunchuk Y-axis deadband - filters noise when joystick is centered
+
+// Disable features
+//#define PA_DISABLE_SPEED_CAP       // Uncomment to disable speed cap (for testing only - USE WITH CAUTION)
+//#define PA_DISABLE_NUNCHUK            // Uncomment to disable nunchuk boost control (constant torque only)
 // ######################### END OF PUSH-ASSIST PARAMETERS ############################
 
 
