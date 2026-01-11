@@ -16,6 +16,7 @@ documentCounts:
 
 **Author:** Dan
 **Date:** 2026-01-09
+**Amended:** 2026-01-11 - Added thumb throttle (PA2) and power off button (PA3) features
 
 ## Executive Summary
 
@@ -242,15 +243,21 @@ Result: Can't run away. Natural speed limiting.
 | Motors | Hoverboard BLDC hub motors (2x) |
 | Feedback | Hall sensors (3 per motor) |
 | Wheels | 8" diameter |
-| Input | Wii Nunchuk via I2C |
+| Input (Primary) | Wii Nunchuk via I2C |
+| Input (Boost) | Thumb throttle - Hall sensor on PA2 (0-2.5V) |
+| Input (Power) | Power off button on PA3 (active low, internal pullup) |
 
 ### Connectivity
 
 | Interface | Details |
 |-----------|---------|
 | Nunchuk I2C | USART3 right cable, 5V tolerant, address 0xA4 |
+| Thumb Throttle | PA2 (ADC Channel 2), left sensor cable |
+| Power Off Button | PA3 (digital input with internal pullup), left sensor cable |
 | Debug Serial | USART3 @ 115200 baud (optional) |
 | Programming | J-Link via SWD |
+
+**Note:** Thumb throttle requires `DEBUG_SERIAL_USART2` disabled (PA2 GPIO conflict).
 
 ### Power Profile
 
@@ -297,6 +304,46 @@ Result: Can't run away. Natural speed limiting.
 - **No OTA:** Direct hardware access required
 - **Build variant:** `VARIANT_NUNCHUK`
 
+### Control Method Configuration
+
+Independent compile-time macros enable/disable each control method:
+
+```c
+#define CONTROL_METHOD_NUNCHUK          // Enable nunchuck Y-axis for torque boost
+#define CONTROL_METHOD_THUMB_THROTTLE   // Enable thumb throttle ADC for torque boost
+#define CONTROL_METHOD_POWER_OFF_BUTTON // Enable PA3 button for power off
+```
+
+| Nunchuck | Thumb Throttle | Boost Behavior |
+|----------|----------------|----------------|
+| Enabled | Disabled | Nunchuck Y-axis controls boost |
+| Disabled | Enabled | Thumb throttle controls boost |
+| Enabled | Enabled | Max of both inputs used for boost |
+| Disabled | Disabled | No boost, normal assist only |
+
+### Thumb Throttle Specification
+
+| Parameter | Value |
+|-----------|-------|
+| Sensor Type | Hall effect thumb throttle |
+| Output Range | 0V - 2.5V |
+| ADC Reference | 3.3V (12-bit = 0-4095) |
+| Low Deadband | 0V - 0.8V (ADC 0-993) - ignored |
+| High Deadband | 2.1V - 2.5V (ADC 2606-4095) - ignored |
+| Working Range | 0.8V - 2.1V (ADC 993-2606) |
+| Function | Maps to torque boost (same as nunchuck Y-axis) |
+
+### Power Off Button Specification
+
+| Parameter | Value |
+|-----------|-------|
+| Input Type | Momentary push button |
+| Active State | Active LOW (ground when pressed) |
+| Pull Resistor | Internal PULLUP enabled |
+| Press < 2s | Ignored - no action |
+| Press >= 2s | Latch OFF - shutdown board |
+| Function | Power OFF only (not power on) |
+
 ## Functional Requirements
 
 ### Motor Assist
@@ -320,6 +367,23 @@ Result: Can't run away. Natural speed limiting.
 - FR11: System detects nunchuk connection state
 - FR12: System defaults to normal mode when nunchuk is idle
 - FR13: System defaults to normal mode when nunchuk is disconnected
+
+### User Input (Thumb Throttle)
+
+- FR23: System shall read thumb throttle input from PA2 via ADC
+- FR24: System shall ignore ADC values below low deadband threshold (0.8V / 993 counts)
+- FR25: System shall ignore ADC values above high deadband threshold (2.1V / 2606 counts)
+- FR26: System shall map working range (0.8V-2.1V) to torque boost (same as nunchuk Y-axis)
+- FR27: System shall allow independent enable/disable of nunchuk and thumb throttle via compile-time macros
+- FR28: When both inputs enabled, system shall use maximum of both for boost calculation
+
+### User Input (Power Off Button)
+
+- FR29: System shall configure PA3 as digital input with internal pullup
+- FR30: System shall detect button press (active low)
+- FR31: System shall require 2 second continuous press to trigger power off
+- FR32: System shall ignore button presses shorter than 2 seconds
+- FR33: System shall latch OFF (shutdown) when 2 second threshold reached
 
 ### State Management
 
@@ -379,4 +443,14 @@ Result: Can't run away. Natural speed limiting.
 | NFR17 | Normal disengage threshold | 10 RPM |
 | NFR18 | Eager engage threshold | 3 RPM |
 | NFR19 | Eager disengage threshold | 2 RPM |
+
+### Thumb Throttle & Power Button
+
+| NFR | Requirement | Target |
+|-----|-------------|--------|
+| NFR20 | Thumb throttle response latency | < 100ms (match nunchuk) |
+| NFR21 | ADC sampling | Uses existing 16kHz DMA (no additional CPU overhead) |
+| NFR22 | Power button debounce | 2 second hold requirement inherently debounces |
+| NFR23 | Thumb throttle low deadband | 0-993 ADC counts (0-0.8V) |
+| NFR24 | Thumb throttle high deadband | 2606-4095 ADC counts (2.1-2.5V) |
 

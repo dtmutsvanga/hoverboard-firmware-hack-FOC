@@ -8,6 +8,7 @@ workflowType: 'epics'
 project_name: 'Push-Assist Stroller System'
 user_name: 'Dan'
 date: '2026-01-09'
+amended: '2026-01-11'
 ---
 
 # Push-Assist Stroller System - Epic Breakdown
@@ -50,6 +51,21 @@ This document provides the complete epic and story breakdown for the Push-Assist
 - FR19: System disengages motor when stroller is stopped
 - FR20: System provides graceful degradation on input failure
 
+**User Input - Thumb Throttle (FR23-FR28):**
+- FR23: System shall read thumb throttle input from PA2 via ADC
+- FR24: System shall ignore ADC values below low deadband threshold (0.8V / 993 counts)
+- FR25: System shall ignore ADC values above high deadband threshold (2.1V / 2606 counts)
+- FR26: System shall map working range (0.8V-2.1V) to torque boost (same as nunchuk Y-axis)
+- FR27: System shall allow independent enable/disable of nunchuk and thumb throttle via compile-time macros
+- FR28: When both inputs enabled, system shall use maximum of both for boost calculation
+
+**User Input - Power Off Button (FR29-FR33):**
+- FR29: System shall configure PA3 as digital input with internal pullup
+- FR30: System shall detect button press (active low)
+- FR31: System shall require 2 second continuous press to trigger power off
+- FR32: System shall ignore button presses shorter than 2 seconds
+- FR33: System shall latch OFF (shutdown) when 2 second threshold reached
+
 ### Non-Functional Requirements
 
 **Performance (NFR1-NFR4):**
@@ -79,6 +95,13 @@ This document provides the complete epic and story breakdown for the Push-Assist
 - NFR18: Eager engage threshold 3 RPM
 - NFR19: Eager disengage threshold 2 RPM
 
+**Thumb Throttle & Power Button (NFR20-NFR24):**
+- NFR20: Thumb throttle response latency < 100ms (match nunchuk)
+- NFR21: ADC sampling uses existing 16kHz DMA (no additional CPU overhead)
+- NFR22: Power button debounce - 2 second hold requirement inherently debounces
+- NFR23: Thumb throttle low deadband 0-993 ADC counts (0-0.8V)
+- NFR24: Thumb throttle high deadband 2606-4095 ADC counts (2.1-2.5V)
+
 ### Additional Requirements
 
 **From Architecture:**
@@ -88,6 +111,12 @@ This document provides the complete epic and story breakdown for the Push-Assist
 - Follow existing naming conventions (camelCase functions, snake_case locals, UPPER_CASE macros)
 - Use existing `ABS()` macro, avoid floating point
 - Set `ctrlModReq = TRQ_MODE` when assisting, `OPEN_MODE` when freewheeling
+
+**From PRD Amendment (2026-01-11):**
+- Add control method macros: `CONTROL_METHOD_NUNCHUK`, `CONTROL_METHOD_THUMB_THROTTLE`, `CONTROL_METHOD_POWER_OFF_BUTTON`
+- Thumb throttle on PA2 uses existing `adc_buffer.l_tx2` (already sampled at 16kHz)
+- Power off button on PA3 requires GPIO config change (digital input with pullup vs ADC)
+- Requires `DEBUG_SERIAL_USART2` disabled when thumb throttle enabled (PA2 GPIO conflict)
 
 ### FR Coverage Map
 
@@ -113,6 +142,17 @@ This document provides the complete epic and story breakdown for the Push-Assist
 | FR18 | 1 | Torque allows physical override |
 | FR19 | 1 | Disengage when stopped |
 | FR20 | 2 | Graceful degradation on failure |
+| FR23 | 3 | Read thumb throttle from PA2 ADC |
+| FR24 | 3 | Thumb throttle low deadband |
+| FR25 | 3 | Thumb throttle high deadband |
+| FR26 | 3 | Map thumb throttle to torque boost |
+| FR27 | 3 | Independent enable/disable macros |
+| FR28 | 3 | Max of both inputs when both enabled |
+| FR29 | 3 | Configure PA3 as digital input |
+| FR30 | 3 | Detect button press (active low) |
+| FR31 | 3 | 2 second press for power off |
+| FR32 | 3 | Ignore presses < 2 seconds |
+| FR33 | 3 | Latch OFF on 2s threshold |
 
 ## Epic List
 
@@ -146,6 +186,23 @@ This document provides the complete epic and story breakdown for the Push-Assist
 - Graceful degradation on any input failure
 
 **Builds on Epic 1:** Adds variable behavior on top of working core algorithm.
+
+---
+
+### Epic 3: Alternative Input Methods
+
+**Goal:** Provide alternative/supplementary control methods (thumb throttle and power off button) that can work independently or alongside nunchuk, with compile-time enable/disable macros.
+
+**FRs covered:** FR23, FR24, FR25, FR26, FR27, FR28, FR29, FR30, FR31, FR32, FR33
+
+**Implementation Notes:**
+- Add control method macros to `Inc/config.h`
+- Thumb throttle reads existing `adc_buffer.l_tx2` (PA2 already sampled)
+- Power off button requires PA3 GPIO reconfiguration (digital input with pullup)
+- Disable `DEBUG_SERIAL_USART2` when thumb throttle enabled
+- When both nunchuk and thumb throttle enabled, use max of both for boost
+
+**Standalone:** Can be implemented independently of Epic 2 (nunchuk). If nunchuk disabled, thumb throttle provides sole boost input.
 
 ---
 
@@ -288,3 +345,126 @@ Parent can request more torque for inclines via nunchuk, and system fails safely
 - Leverage existing nunchuk timeout detection in firmware
 - Default behavior = Normal mode (safe, not disabled)
 
+---
+
+## Epic 3: Alternative Input Methods
+
+Provide alternative/supplementary control methods (thumb throttle and power off button) that can work independently or alongside nunchuk, with compile-time enable/disable macros.
+
+### Story 3.1: Control Method Configuration Macros
+
+**As a** developer,
+**I want** compile-time macros to enable/disable each control method independently,
+**So that** I can configure the exact input methods needed for my build.
+
+**Acceptance Criteria:**
+
+**Given** the `Inc/config.h` file
+**When** the control method section is added
+**Then** the following macros are defined:
+- `CONTROL_METHOD_NUNCHUK` - Enable/disable nunchuk Y-axis boost
+- `CONTROL_METHOD_THUMB_THROTTLE` - Enable/disable thumb throttle ADC boost
+- `CONTROL_METHOD_POWER_OFF_BUTTON` - Enable/disable PA3 power off button
+
+**And** each macro can be commented/uncommented independently (FR27)
+**And** code compiles with any combination of enabled/disabled macros
+**And** when `CONTROL_METHOD_THUMB_THROTTLE` is enabled, `DEBUG_SERIAL_USART2` must be disabled (add compile-time check)
+
+**Given** both `CONTROL_METHOD_NUNCHUK` and `CONTROL_METHOD_THUMB_THROTTLE` are enabled
+**When** boost is calculated
+**Then** system uses maximum of both inputs for torque boost (FR28)
+
+**Implementation Notes:**
+- Add macros in push-assist configuration section of config.h
+- Add `#if defined(CONTROL_METHOD_THUMB_THROTTLE) && defined(DEBUG_SERIAL_USART2)` error check
+- Default: All three enabled for maximum flexibility
+
+---
+
+### Story 3.2: Thumb Throttle ADC Input
+
+**As a** parent pushing the stroller,
+**I want** to use a thumb throttle for torque boost instead of/alongside nunchuk,
+**So that** I have an alternative, simpler control method.
+
+**Acceptance Criteria:**
+
+**Given** `CONTROL_METHOD_THUMB_THROTTLE` is enabled
+**When** the system initializes
+**Then** PA2 is configured for ADC input (already done by existing ADC2 setup)
+**And** `DEBUG_SERIAL_USART2` is disabled (GPIO conflict)
+
+**Given** thumb throttle ADC value is below 993 counts (0.8V)
+**When** the boost is calculated
+**Then** thumb throttle contribution is zero (low deadband) (FR24)
+
+**Given** thumb throttle ADC value is above 2606 counts (2.1V)
+**When** the boost is calculated
+**Then** thumb throttle contribution is maximum/clamped (high deadband) (FR25)
+
+**Given** thumb throttle ADC value is in working range (993-2606 counts)
+**When** I press the throttle
+**Then** value is mapped linearly to torque boost (FR26)
+**And** boost calculation matches nunchuk Y-axis behavior
+**And** response latency < 100ms (NFR20)
+
+**Given** both nunchuk and thumb throttle are enabled and active
+**When** both have non-zero boost values
+**Then** system uses the maximum of both inputs (FR28)
+
+**Given** `CONTROL_METHOD_THUMB_THROTTLE` is disabled
+**When** code compiles
+**Then** all thumb throttle code is excluded (no overhead)
+
+**Implementation Notes:**
+- Read from `adc_buffer.l_tx2` (PA2 already sampled at 16kHz by ADC2)
+- Add deadband constants: `PA_THUMB_DEADBAND_LOW` = 993, `PA_THUMB_DEADBAND_HIGH` = 2606
+- Map working range to 0-127 (same scale as nunchuk Y-axis)
+- Use `#ifdef CONTROL_METHOD_THUMB_THROTTLE` guards
+
+---
+
+### Story 3.3: Power Off Button
+
+**As a** user of the stroller system,
+**I want** a dedicated button to power off the board with a long press,
+**So that** I can safely shut down without accessing the main power button.
+
+**Acceptance Criteria:**
+
+**Given** `CONTROL_METHOD_POWER_OFF_BUTTON` is enabled
+**When** the system initializes
+**Then** PA3 is configured as digital input with internal pullup (FR29)
+**And** PA3 is NOT used for ADC (reconfigure from analog to digital)
+
+**Given** the button is not pressed
+**When** PA3 is read
+**Then** value is HIGH (pullup to VCC)
+
+**Given** the button is pressed (connected to ground)
+**When** PA3 is read
+**Then** value is LOW (active low) (FR30)
+
+**Given** button is pressed for less than 2 seconds
+**When** released before 2 seconds
+**Then** no action is taken (FR32)
+**And** press timer resets
+
+**Given** button is pressed and held
+**When** 2 second threshold is reached
+**Then** system latches OFF (shutdown) (FR31, FR33)
+**And** shutdown is immediate upon reaching threshold (don't wait for release)
+
+**Given** `CONTROL_METHOD_POWER_OFF_BUTTON` is disabled
+**When** code compiles
+**Then** PA3 remains as ADC input (default behavior)
+**And** all power off button code is excluded
+
+**Implementation Notes:**
+- Add GPIO init for PA3: `GPIO_MODE_INPUT` with `GPIO_PULLUP`
+- Use a counter in main loop (1ms tick) to track press duration
+- 2 seconds = 2000 counts at 1ms loop
+- Call existing power-off/shutdown function when threshold reached
+- Use `#ifdef CONTROL_METHOD_POWER_OFF_BUTTON` guards
+
+---
